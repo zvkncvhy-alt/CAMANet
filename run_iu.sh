@@ -23,9 +23,8 @@ python main.py \
 --seed 2401 \
 --addcls  \
 --cls_w 1 \
---fbl \
---attn_cam \
---attn_method max \
---topk 0.25 \
---layer_id 2 \
---mse_w 0.15 \
+--evidence_chain \
+--num_anatomy_queries 8 \
+--num_disease_labels 14 \
+--evidence_cov_w 0.5 \
+--evidence_pos_tau 0.15

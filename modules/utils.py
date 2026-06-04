@@ -204,6 +204,27 @@ def parse_args():
     parser.add_argument('--clip', action='store_true', help='perform clip alignment.')
     parser.add_argument('--clip_w', type=float, default=0.5, help='the weight for clip loss')
 
+    # Evidence-chain report generation modules. These replace CAM-guided foreground/background
+    # learning when --evidence_chain is enabled.
+    parser.add_argument('--evidence_chain', action='store_true',
+                        help='use anatomy evidence, disease-state evidence, and evidence coverage decoding')
+    parser.add_argument('--num_anatomy_queries', type=int, default=8,
+                        help='the number of learnable anatomy evidence queries')
+    parser.add_argument('--num_disease_labels', type=int, default=14,
+                        help='the number of disease-state evidence tokens and classification labels')
+    parser.add_argument('--evidence_num_heads', type=int, default=8,
+                        help='the number of attention heads in evidence modules')
+    parser.add_argument('--evidence_dropout', type=float, default=0.1,
+                        help='dropout rate in evidence modules')
+    parser.add_argument('--evidence_cov_w', type=float, default=0.5,
+                        help='the weight for evidence coverage loss')
+    parser.add_argument('--evidence_pos_tau', type=float, default=0.15,
+                        help='minimum expected max decoder attention on positive disease evidence')
+    parser.add_argument('--evidence_neg_w', type=float, default=0.25,
+                        help='negative disease attention suppression weight inside coverage loss')
+    parser.add_argument('--evidence_div_w', type=float, default=0.01,
+                        help='diversity regularization weight for anatomy evidence attention maps')
+
     args, unparsed = parser.parse_known_args()
     config = get_config(args)
     return args, config

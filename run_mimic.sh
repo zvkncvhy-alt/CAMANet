@@ -24,9 +24,8 @@ python main.py \
 --randaug \
 --addcls \
 --cls_w 1 \
---fbl \
---attn_cam \
---topk 0.3 \
---layer_id 2 \
---attn_method max \
---mse_w 0.5 \
+--evidence_chain \
+--num_anatomy_queries 8 \
+--num_disease_labels 14 \
+--evidence_cov_w 0.5 \
+--evidence_pos_tau 0.15

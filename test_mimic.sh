@@ -25,13 +25,12 @@ CUDA_VISIBLE_DEVICES=0 python test.py \
 --seed 456789 \
 --addcls  \
 --cls_w 1 \
---fbl \
---attn_cam \
---topk 0.25 \
---layer_id 2 \
---attn_method max \
---mse_w 0.5 \
---test \
+--evidence_chain \
+--num_anatomy_queries 8 \
+--num_disease_labels 14 \
+--evidence_cov_w 0.5 \
+--evidence_pos_tau 0.15 \
+--test
 #--early_exit \
 #--sub_back \
 #--randaug  \
