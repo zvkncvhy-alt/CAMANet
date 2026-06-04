@@ -54,14 +54,15 @@ class VisualExtractor(nn.Module):
             self.num_features = model.classifier.in_features
             self.model = model.features
             self.avg_fnt = torch.nn.AvgPool2d(kernel_size=1, stride=1, padding=0)
-        if args.addcls:
+        self.evidence_chain = getattr(args, 'evidence_chain', False)
+        if args.addcls and not self.evidence_chain:
             self.head = Linear(self.num_features, n_classes)
             #self.cam = CAM(normalized=True, relu=args.relu)
             self.cam = CAM()
         # trunc_normal_(self.head.weight, std=1 / math.sqrt(self.num_features * n_classes))
         # nn.init.constant_(self.head.bias, 0)
         args.d_vf = self.num_features
-        self.addcls = args.addcls
+        self.addcls = args.addcls and not self.evidence_chain
 
 
     def forward(self, images, labels=None, mode='train'):

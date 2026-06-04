@@ -9,6 +9,7 @@ from numpy import inf
 from tqdm import tqdm
 from modules.utils import auto_resume_helper
 from modules.weighted_mesloss import Weighted_MSELoss
+from modules.evidence_losses import EvidenceCoverageLoss
 import json
 # try:
 #     # noinspection PyUnresolvedReferences
@@ -37,14 +38,22 @@ class BaseTrainer(object):
         if args.n_gpu > 1:
             self.model = torch.nn.DataParallel(model, device_ids=device_ids)
 
-        if args.addcls:
+        self.evidence_chain = getattr(args, 'evidence_chain', False)
+        if args.addcls or self.evidence_chain:
             self.cls_criterion = torch.nn.BCEWithLogitsLoss()
             self.cls_w = args.cls_w
-        self.attn_cam = args.attn_cam
+        self.attn_cam = args.attn_cam and not self.evidence_chain
         self.wmse = args.wmse
-        if args.attn_cam:
+        if self.attn_cam:
             self.mse_criterion = Weighted_MSELoss(weight=args.wmse)
             self.mse_w = args.mse_w
+        if self.evidence_chain:
+            self.evidence_criterion = EvidenceCoverageLoss(
+                pos_tau=args.evidence_pos_tau,
+                neg_weight=args.evidence_neg_w,
+                div_weight=args.evidence_div_w,
+            )
+            self.evidence_cov_w = args.evidence_cov_w
         self.criterion = criterion
         self.metric_ftns = metric_ftns
 
@@ -249,10 +258,12 @@ class Trainer(BaseTrainer):
         ce_losses = 0
         img_cls_losses = 0
         mse_losses = 0
+        evidence_losses = 0
         clip_losses = 0
         val_ce_losses = 0
         val_img_cls_losses = 0
         val_mse_losses = 0
+        val_evidence_losses = 0
         std_fores, std_attns = 0, 0
         num_steps = len(self.train_dataloader)
         self.model.train()
@@ -264,9 +275,11 @@ class Trainer(BaseTrainer):
                                                      reports_ids.to(self.device, non_blocking=True), \
                                                      reports_masks.to(self.device, non_blocking=True), \
                                                      labels.to(self.device, non_blocking = True)
-                logits, total_att, clip_loss, total_attn = None, None, None, None
+                logits, total_att, clip_loss, total_attn, evidence_outputs = None, None, None, None, None
 
-                if self.addcls:
+                if self.evidence_chain:
+                    output, logits, evidence_outputs, clip_loss = self.model(images, reports_ids, labels, mode='train')
+                elif self.addcls:
                     output, logits, cam, fore_map, total_attn, _, align_attns_train, clip_loss = self.model(images, reports_ids, labels, mode='train')
                 else:
                         output, clip_loss = self.model(images, reports_ids, mode='train')
@@ -284,6 +297,11 @@ class Trainer(BaseTrainer):
                     mse_loss = self.mse_criterion(total_attn, fore_map, logits, labels)
                     loss = loss + self.mse_w * mse_loss
                     mse_losses += mse_loss.item()
+
+                if evidence_outputs is not None:
+                    evidence_loss, evidence_log = self.evidence_criterion(evidence_outputs, labels, reports_masks)
+                    loss = loss + self.evidence_cov_w * evidence_loss
+                    evidence_losses += evidence_loss.item()
 
                 if clip_loss is not None:
                     loss = loss + self.clip_w * clip_loss
@@ -311,12 +329,14 @@ class Trainer(BaseTrainer):
                 cur_lr = [param_group['lr'] for param_group in self.optimizer.param_groups]
                 pbar.set_postfix(ce_ls=ce_losses / (batch_idx + 1), cls_ls=img_cls_losses / (batch_idx + 1),
                                  clip_ls=clip_losses / (batch_idx + 1),
-                                 mse_ls = mse_losses / (batch_idx + 1), mem = f'mem {memory_used:.0f}MB')
+                                 mse_ls=mse_losses / (batch_idx + 1),
+                                 ev_ls=evidence_losses / (batch_idx + 1), mem=f'mem {memory_used:.0f}MB')
                 pbar.update()
             log = {'ce_loss': ce_losses / len(self.train_dataloader)}
         self.writer.add_scalar('data/ce_loss', ce_losses/len(self.train_dataloader), epoch)
         self.writer.add_scalar('data/cls_loss', img_cls_losses/len(self.train_dataloader), epoch)
         self.writer.add_scalar('data/mse_loss', mse_losses/len(self.train_dataloader), epoch)
+        self.writer.add_scalar('data/evidence_loss', evidence_losses/len(self.train_dataloader), epoch)
         self.writer.add_scalar('data/std_fore', std_fores/len(self.train_dataloader), epoch)
         self.writer.add_scalar('data/std_attn', std_attns/len(self.train_dataloader), epoch)
 
@@ -330,7 +350,12 @@ class Trainer(BaseTrainer):
                                                          reports_masks.to(self.device, non_blocking=True), \
                                                          labels.to(self.device, non_blocking = True)
                     total_attn = None
-                    if self.addcls:
+                    evidence_outputs = None
+                    if self.evidence_chain:
+                        out, logits, evidence_outputs, clip_loss = self.model(images, reports_ids, labels, mode='train')
+                        val_img_cls_loss = self.cls_criterion(logits, labels)
+                        val_img_cls_losses += val_img_cls_loss.item()
+                    elif self.addcls:
                         out, logits, cam, fore_map, total_attn, _, _, clip_loss = self.model(images, reports_ids, labels, mode='train')
                         val_img_cls_loss = self.cls_criterion(logits,labels)
                         val_img_cls_losses += val_img_cls_loss.item()
@@ -343,6 +368,9 @@ class Trainer(BaseTrainer):
                     if total_attn is not None:
                         mse_loss = self.mse_criterion(total_attn, fore_map, logits, labels)
                         val_mse_losses += mse_loss.item()
+                    if evidence_outputs is not None:
+                        evidence_loss, evidence_log = self.evidence_criterion(evidence_outputs, labels, reports_masks)
+                        val_evidence_losses += evidence_loss.item()
                     loss = self.criterion(out, reports_ids, reports_masks)
                     val_ce_losses += loss.item()
                     reports = self.tokenizer.decode_batch(output.cpu().numpy())
@@ -351,7 +379,8 @@ class Trainer(BaseTrainer):
                     val_gts.extend(ground_truths)
                     memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
                     pbar.set_postfix(ce_ls=val_ce_losses / (batch_idx + 1), cls_ls=val_img_cls_losses / (batch_idx + 1),
-                                     mse_ls = val_mse_losses / (batch_idx + 1), mem=f'mem {memory_used:.0f}MB')
+                                     mse_ls=val_mse_losses / (batch_idx + 1),
+                                     ev_ls=val_evidence_losses / (batch_idx + 1), mem=f'mem {memory_used:.0f}MB')
                     pbar.update()
                 val_met = self.metric_ftns({i: [gt] for i, gt in enumerate(val_gts)},
                                            {i: [re] for i, re in enumerate(val_res)})
@@ -366,6 +395,7 @@ class Trainer(BaseTrainer):
         self.writer.add_scalar('data/val_ce_loss', val_ce_losses/ len(self.val_dataloader), epoch)
         self.writer.add_scalar('data/val_cls_loss', val_img_cls_losses/ len(self.val_dataloader), epoch)
         self.writer.add_scalar('data/val_mse_loss', val_mse_losses/ len(self.val_dataloader), epoch)
+        self.writer.add_scalar('data/val_evidence_loss', val_evidence_losses/ len(self.val_dataloader), epoch)
 
 
         self.model.eval()
@@ -376,7 +406,7 @@ class Trainer(BaseTrainer):
                     images, reports_ids, reports_masks, labels = images.to(self.device,non_blocking=True), \
                                                          reports_ids.to(self.device,non_blocking=True), \
                                                          reports_masks.to(self.device, non_blocking=True), \
-                                                         labels.cuda(self.device, non_blocking=True)
+                                                         labels.to(self.device, non_blocking=True)
                     #out = self.model(images, reports_ids, mode='train')
                     #loss = self.criterion(out, reports_ids, reports_masks)
                     output, _, _ = self.model(images, labels=labels,  mode='sample')
@@ -409,7 +439,7 @@ class Trainer(BaseTrainer):
                     images, reports_ids, reports_masks, labels = images.to(self.device,non_blocking=True), \
                                                          reports_ids.to(self.device,non_blocking=True), \
                                                          reports_masks.to(self.device, non_blocking=True), \
-                                                         labels.cuda(self.device, non_blocking=True)
+                                                         labels.to(self.device, non_blocking=True)
                     #out = self.model(images, reports_ids, mode='train')
                     #loss = self.criterion(out, reports_ids, reports_masks)
                     output, _, _ = self.model(images, labels=labels,  mode='sample')
